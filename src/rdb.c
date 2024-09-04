@@ -1843,11 +1843,21 @@ int lpValidateIntegrityAndDups(unsigned char *lp, size_t size, int deep, int pai
     return ret;
 }
 
+static inline robj *rdbLoadObjectReal(int rdbtype, rio *rdb, sds key, int dbid, int *error);
+
+robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
+    robj *rv;
+    pthread_setspecific(server.in_rdbload, (void*)0x01);
+    rv = rdbLoadObjectReal(rdbtype, rdb, key, dbid, error);
+    pthread_setspecific(server.in_rdbload, NULL);
+    return rv;
+}
+
 /* Load an Object of the specified type from the specified file.
  * On success a newly allocated object is returned, otherwise NULL.
  * When the function returns NULL and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the type of error that occurred */
-robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
+static inline robj *rdbLoadObjectReal(int rdbtype, rio *rdb, sds key, int dbid, int *error) {
     robj *o = NULL, *ele, *dec;
     uint64_t len;
     unsigned int i;

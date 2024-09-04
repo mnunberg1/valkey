@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "server.h"
 
 #include "listpack.h"
 #include "listpack_malloc.h"
@@ -1311,7 +1312,9 @@ int lpValidateNext(unsigned char *lp, unsigned char **pp, size_t lpbytes) {
 
 /* Validate that the entry doesn't reach outside the listpack allocation. */
 static inline void lpAssertValidEntry(unsigned char *lp, size_t lpbytes, unsigned char *p) {
-    assert(lpValidateNext(lp, &p, lpbytes));
+    if (pthread_getspecific(server.in_rdbload)) {
+        assert(lpValidateNext(lp, &p, lpbytes));
+    }
 }
 
 /* Validate the integrity of the data structure.

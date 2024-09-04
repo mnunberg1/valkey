@@ -2120,6 +2120,8 @@ void initServerConfig(void) {
 
     /* Debugging */
     server.watchdog_period = 0;
+    pthread_key_create(&server.in_rdbload, NULL);
+    pthread_setspecific(server.in_rdbload, NULL);
 }
 
 extern char **environ;
