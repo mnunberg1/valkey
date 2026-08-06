@@ -71,7 +71,8 @@ TEST_MODULES = \
     cluster.so \
     helloscripting.so \
     unsupported_features.so \
-    deferred_reply.so
+    deferred_reply.so \
+    redismodule_compat.so
 
 .PHONY: all
 
@@ -80,7 +81,7 @@ all: $(TEST_MODULES)
 32bit:
 	$(MAKE) CFLAGS="-m32" LDFLAGS="-m32"
 
-%.xo: %.c ../../src/valkeymodule.h
+%.xo: %.c ../../src/valkeymodule.h ../../src/redismodule.h
 	$(CC) -I../../src $(CFLAGS) $(SHOBJ_CFLAGS) -fPIC -c $< -o $@
 
 %.so: %.xo

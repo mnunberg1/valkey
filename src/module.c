@@ -13908,6 +13908,29 @@ unsigned long long getModuleUnsignedNumericConfig(ModuleConfig *module_config) {
     return module_config->get_fn.get_unsigned_numeric(module_config->name, module_config->privdata);
 }
 
+/* Applies default values for every config the module has registered so far.
+ * Used by VM_LoadDefaultConfigs() to let a module see its own default values
+ * applied before it decides whether to make further changes ahead of the
+ * user-provided values being applied by VM_LoadConfigs(). */
+int loadModuleDefaultConfigs(ValkeyModule *module) {
+    listIter li;
+    listNode *ln;
+    const char *err = NULL;
+    listRewind(module->module_configs, &li);
+    while ((ln = listNext(&li))) {
+        ModuleConfig *module_config = listNodeValue(ln);
+        sds config_name = sdscatfmt(sdsempty(), "%s.%s", module->name, module_config->name);
+        if (!performModuleConfigSetDefaultFromName(config_name, &err)) {
+            serverLog(LL_WARNING, "Issue attempting to set default value of configuration %s : %s", config_name, err);
+            sdsfree(config_name);
+            return VALKEYMODULE_ERR;
+        }
+        sdsfree(config_name);
+    }
+    module->configs_initialized = 1;
+    return VALKEYMODULE_OK;
+}
+
 /* This function takes a module and a list of configs stored as sds NAME VALUE pairs.
  * It attempts to call set on each of these configs. */
 int loadModuleConfigs(ValkeyModule *module) {
@@ -14279,6 +14302,23 @@ int VM_RegisterUnsignedNumericConfig(ValkeyModuleCtx *ctx,
     flags = maskModuleConfigFlags(flags);
     addModuleUnsignedNumericConfig(module->name, name, flags, new_config, default_val, numeric_flags, min, max);
     return VALKEYMODULE_OK;
+}
+
+/* Applies all default configurations for the parameters the module registered.
+ * Only call this function if the module would like to make changes to the
+ * configuration values before the actual values are applied by VM_LoadConfigs.
+ * Otherwise it's sufficient to call VM_LoadConfigs, it should already set the
+ * default values if needed.
+ * This will return VALKEYMODULE_ERR if it is called:
+ * 1. outside ValkeyModule_OnLoad
+ * 2. more than once
+ * 3. after the VM_LoadConfigs call */
+int VM_LoadDefaultConfigs(ValkeyModuleCtx *ctx) {
+    if (!ctx || !ctx->module || !ctx->module->onload || ctx->module->configs_initialized) {
+        return VALKEYMODULE_ERR;
+    }
+    ValkeyModule *module = ctx->module;
+    return loadModuleDefaultConfigs(module);
 }
 
 /* Applies all pending configurations on the module load. This should be called
@@ -15106,6 +15146,162 @@ int VM_ACLCheckKeyPrefixPermissions(ValkeyModuleUser *user, const char *key, siz
     return VALKEYMODULE_OK;
 }
 
+
+/* --------------------------------------------------------------------------
+ * ## Config access API
+ * -------------------------------------------------------------------------- */
+
+/* These mirror the public typedef/enum declared in the modules-only section
+ * of valkeymodule.h (compiled out here under VALKEYMODULE_CORE), the same
+ * way ValkeyModuleBlockedClient et al. get their own local definition above.
+ * Values must stay numerically identical to the header's copy, since the two
+ * are only ever connected via the untyped REGISTER_API function-pointer
+ * table, not the compiler. */
+typedef struct ValkeyModuleConfigIterator {
+    dictIterator *di;
+    sds pattern;
+    int is_glob;
+} ValkeyModuleConfigIterator;
+
+typedef enum ValkeyModuleConfigType {
+    VALKEYMODULE_CONFIG_TYPE_BOOL,
+    VALKEYMODULE_CONFIG_TYPE_NUMERIC,
+    VALKEYMODULE_CONFIG_TYPE_STRING,
+    VALKEYMODULE_CONFIG_TYPE_ENUM,
+} ValkeyModuleConfigType;
+
+/* Get an iterator to all configs.
+ * Optional `ctx` can be provided if use of auto-memory is desired.
+ * Optional `pattern` can be provided to filter configs by name. If `pattern` is
+ * NULL all configs will be returned.
+ *
+ * The returned iterator can be used to iterate over all configs using
+ * ValkeyModule_ConfigIteratorNext(). The caller is responsible for freeing
+ * the iterator using ValkeyModule_ConfigIteratorRelease(). */
+ValkeyModuleConfigIterator *VM_ConfigIteratorCreate(ValkeyModuleCtx *ctx, const char *pattern) {
+    UNUSED(ctx);
+    ValkeyModuleConfigIterator *iter = zmalloc(sizeof(*iter));
+
+    iter->di = getConfigIterator();
+    if (pattern != NULL) {
+        iter->pattern = sdsnew(pattern);
+        iter->is_glob = (strpbrk(pattern, "*?[") != NULL);
+    } else {
+        iter->pattern = NULL;
+        iter->is_glob = 0;
+    }
+    return iter;
+}
+
+/* Release the iterator returned by ValkeyModule_ConfigIteratorCreate(). */
+void VM_ConfigIteratorRelease(ValkeyModuleCtx *ctx, ValkeyModuleConfigIterator *iter) {
+    UNUSED(ctx);
+    if (iter->di) dictReleaseIterator(iter->di);
+    sdsfree(iter->pattern);
+    zfree(iter);
+}
+
+/* Go to the next element of the config iterator.
+ *
+ * Returns the name of the next config, or NULL if there are no more configs.
+ * The returned string is non-owning and must not be freed. If a pattern was
+ * provided when creating the iterator, only configs matching the pattern
+ * will be returned. */
+const char *VM_ConfigIteratorNext(ValkeyModuleConfigIterator *iter) {
+    return configIteratorNext(&iter->di, iter->pattern, iter->is_glob, NULL);
+}
+
+/* Get the type of a config as ValkeyModuleConfigType.
+ *
+ * If a config with the given name exists `res` is populated with its type,
+ * else VALKEYMODULE_ERR is returned. */
+int VM_ConfigGetType(const char *name, ValkeyModuleConfigType *res) {
+    configType type;
+    if (!getConfigTypeFromName(name, &type)) return VALKEYMODULE_ERR;
+    switch (type) {
+    case BOOL_CONFIG: *res = VALKEYMODULE_CONFIG_TYPE_BOOL; break;
+    case NUMERIC_CONFIG: *res = VALKEYMODULE_CONFIG_TYPE_NUMERIC; break;
+    case ENUM_CONFIG: *res = VALKEYMODULE_CONFIG_TYPE_ENUM; break;
+    case STRING_CONFIG:
+    case SDS_CONFIG:
+    case SPECIAL_CONFIG:
+    default: *res = VALKEYMODULE_CONFIG_TYPE_STRING; break;
+    }
+    return VALKEYMODULE_OK;
+}
+
+/* Get the value of a config as a string. This function can be used to get the
+ * value of any config, regardless of its type. The string is allocated by
+ * the module and must be freed by the caller unless auto memory is enabled. */
+int VM_ConfigGet(ValkeyModuleCtx *ctx, const char *name, ValkeyModuleString **res) {
+    sds value = NULL;
+    if (!getStringConfigFromName(name, &value)) return VALKEYMODULE_ERR;
+    *res = VM_CreateString(ctx, value, sdslen(value));
+    sdsfree(value);
+    return VALKEYMODULE_OK;
+}
+
+/* Get the value of a bool config. */
+int VM_ConfigGetBool(ValkeyModuleCtx *ctx, const char *name, int *res) {
+    UNUSED(ctx);
+    if (!getBoolConfigFromName(name, res)) return VALKEYMODULE_ERR;
+    return VALKEYMODULE_OK;
+}
+
+/* Get the value of an enum config. If the config has multiple arguments they
+ * are returned as a space-separated string. */
+int VM_ConfigGetEnum(ValkeyModuleCtx *ctx, const char *name, ValkeyModuleString **res) {
+    sds value = NULL;
+    if (!getEnumConfigFromName(name, &value)) return VALKEYMODULE_ERR;
+    *res = VM_CreateString(ctx, value, sdslen(value));
+    sdsfree(value);
+    return VALKEYMODULE_OK;
+}
+
+/* Get the value of a numeric config. */
+int VM_ConfigGetNumeric(ValkeyModuleCtx *ctx, const char *name, long long *res) {
+    UNUSED(ctx);
+    if (!getNumericConfigFromName(name, res)) return VALKEYMODULE_ERR;
+    return VALKEYMODULE_OK;
+}
+
+/* Set the value of a config. This function can be used to set the value of
+ * any config, regardless of its type. If the config is multi-argument, the
+ * value must be a space-separated string. */
+int VM_ConfigSet(ValkeyModuleCtx *ctx, const char *name, ValkeyModuleString *value, ValkeyModuleString **err) {
+    const char *cerr = NULL;
+    const char *val = VM_StringPtrLen(value, NULL);
+    int res = setStringConfigFromName(ctx->client, name, val, &cerr);
+    if (err && cerr) *err = VM_CreateString(ctx, cerr, strlen(cerr));
+    return res ? VALKEYMODULE_OK : VALKEYMODULE_ERR;
+}
+
+/* Set the value of a bool config. */
+int VM_ConfigSetBool(ValkeyModuleCtx *ctx, const char *name, int value, ValkeyModuleString **err) {
+    const char *cerr = NULL;
+    int res = setBoolConfigFromName(ctx->client, name, value, &cerr);
+    if (err && cerr) *err = VM_CreateString(ctx, cerr, strlen(cerr));
+    return res ? VALKEYMODULE_OK : VALKEYMODULE_ERR;
+}
+
+/* Set the value of an enum config. If the config is multi-argument the value
+ * parameter must be a space-separated string. */
+int VM_ConfigSetEnum(ValkeyModuleCtx *ctx, const char *name, ValkeyModuleString *value, ValkeyModuleString **err) {
+    const char *cerr = NULL;
+    const char *val = VM_StringPtrLen(value, NULL);
+    int res = setEnumConfigFromName(ctx->client, name, val, &cerr);
+    if (err && cerr) *err = VM_CreateString(ctx, cerr, strlen(cerr));
+    return res ? VALKEYMODULE_OK : VALKEYMODULE_ERR;
+}
+
+/* Set the value of a numeric config. */
+int VM_ConfigSetNumeric(ValkeyModuleCtx *ctx, const char *name, long long value, ValkeyModuleString **err) {
+    const char *cerr = NULL;
+    int res = setNumericConfigFromName(ctx->client, name, value, &cerr);
+    if (err && cerr) *err = VM_CreateString(ctx, cerr, strlen(cerr));
+    return res ? VALKEYMODULE_OK : VALKEYMODULE_ERR;
+}
+
 /* Register all the APIs we export. Keep this function at the end of the
  * file so that's easy to seek it to add new entries. */
 void moduleRegisterCoreAPI(void) {
@@ -15472,6 +15668,19 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(RegisterStringConfig);
     REGISTER_API(RegisterEnumConfig);
     REGISTER_API(LoadConfigs);
+    REGISTER_API(LoadDefaultConfigs);
+    REGISTER_API(ConfigIteratorCreate);
+    REGISTER_API(ConfigIteratorRelease);
+    REGISTER_API(ConfigIteratorNext);
+    REGISTER_API(ConfigGetType);
+    REGISTER_API(ConfigGet);
+    REGISTER_API(ConfigGetBool);
+    REGISTER_API(ConfigGetEnum);
+    REGISTER_API(ConfigGetNumeric);
+    REGISTER_API(ConfigSet);
+    REGISTER_API(ConfigSetBool);
+    REGISTER_API(ConfigSetEnum);
+    REGISTER_API(ConfigSetNumeric);
     REGISTER_API(RegisterAuthCallback);
     REGISTER_API(RdbStreamCreateFromFile);
     REGISTER_API(RdbStreamFree);

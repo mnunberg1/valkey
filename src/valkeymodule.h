@@ -1515,6 +1515,16 @@ typedef int (*ValkeyModuleConfigSetUnsignedNumericFunc)(const char *name,
 typedef int (*ValkeyModuleConfigSetBoolFunc)(const char *name, int val, void *privdata, ValkeyModuleString **err);
 typedef int (*ValkeyModuleConfigSetEnumFunc)(const char *name, int val, void *privdata, ValkeyModuleString **err);
 typedef int (*ValkeyModuleConfigApplyFunc)(ValkeyModuleCtx *ctx, void *privdata, ValkeyModuleString **err);
+
+/* Config access API (read/write any registered config, core or module, by name) */
+enum ValkeyModuleConfigType {
+    VALKEYMODULE_CONFIG_TYPE_BOOL,
+    VALKEYMODULE_CONFIG_TYPE_NUMERIC,
+    VALKEYMODULE_CONFIG_TYPE_STRING,
+    VALKEYMODULE_CONFIG_TYPE_ENUM,
+};
+typedef enum ValkeyModuleConfigType ValkeyModuleConfigType;
+typedef struct ValkeyModuleConfigIterator ValkeyModuleConfigIterator;
 typedef void (*ValkeyModuleOnUnblocked)(ValkeyModuleCtx *ctx, ValkeyModuleCallReply *reply, void *private_data);
 typedef int (*ValkeyModuleAuthCallback)(ValkeyModuleCtx *ctx,
                                         ValkeyModuleString *username,
@@ -2283,6 +2293,40 @@ VALKEYMODULE_API int (*ValkeyModule_RegisterEnumConfig)(ValkeyModuleCtx *ctx,
                                                         ValkeyModuleConfigApplyFunc applyfn,
                                                         void *privdata) VALKEYMODULE_ATTR;
 VALKEYMODULE_API int (*ValkeyModule_LoadConfigs)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_LoadDefaultConfigs)(ValkeyModuleCtx *ctx) VALKEYMODULE_ATTR;
+VALKEYMODULE_API ValkeyModuleConfigIterator *(*ValkeyModule_ConfigIteratorCreate)(ValkeyModuleCtx *ctx,
+                                                                                  const char *pattern)
+    VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_ConfigIteratorRelease)(ValkeyModuleCtx *ctx,
+                                                             ValkeyModuleConfigIterator *iter) VALKEYMODULE_ATTR;
+VALKEYMODULE_API const char *(*ValkeyModule_ConfigIteratorNext)(ValkeyModuleConfigIterator *iter) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigGetType)(const char *name, ValkeyModuleConfigType *res) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigGet)(ValkeyModuleCtx *ctx,
+                                               const char *name,
+                                               ValkeyModuleString **res) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigGetBool)(ValkeyModuleCtx *ctx, const char *name, int *res) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigGetEnum)(ValkeyModuleCtx *ctx,
+                                                    const char *name,
+                                                    ValkeyModuleString **res) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigGetNumeric)(ValkeyModuleCtx *ctx,
+                                                       const char *name,
+                                                       long long *res) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigSet)(ValkeyModuleCtx *ctx,
+                                               const char *name,
+                                               ValkeyModuleString *value,
+                                               ValkeyModuleString **err) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigSetBool)(ValkeyModuleCtx *ctx,
+                                                    const char *name,
+                                                    int value,
+                                                    ValkeyModuleString **err) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigSetEnum)(ValkeyModuleCtx *ctx,
+                                                    const char *name,
+                                                    ValkeyModuleString *value,
+                                                    ValkeyModuleString **err) VALKEYMODULE_ATTR;
+VALKEYMODULE_API int (*ValkeyModule_ConfigSetNumeric)(ValkeyModuleCtx *ctx,
+                                                       const char *name,
+                                                       long long value,
+                                                       ValkeyModuleString **err) VALKEYMODULE_ATTR;
 VALKEYMODULE_API ValkeyModuleRdbStream *(*ValkeyModule_RdbStreamCreateFromFile)(const char *filename)VALKEYMODULE_ATTR;
 VALKEYMODULE_API void (*ValkeyModule_RdbStreamFree)(ValkeyModuleRdbStream *stream) VALKEYMODULE_ATTR;
 VALKEYMODULE_API int (*ValkeyModule_RdbLoad)(ValkeyModuleCtx *ctx,
@@ -2688,6 +2732,19 @@ static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, in
     VALKEYMODULE_GET_API(RegisterStringConfig);
     VALKEYMODULE_GET_API(RegisterEnumConfig);
     VALKEYMODULE_GET_API(LoadConfigs);
+    VALKEYMODULE_GET_API(LoadDefaultConfigs);
+    VALKEYMODULE_GET_API(ConfigIteratorCreate);
+    VALKEYMODULE_GET_API(ConfigIteratorRelease);
+    VALKEYMODULE_GET_API(ConfigIteratorNext);
+    VALKEYMODULE_GET_API(ConfigGetType);
+    VALKEYMODULE_GET_API(ConfigGet);
+    VALKEYMODULE_GET_API(ConfigGetBool);
+    VALKEYMODULE_GET_API(ConfigGetEnum);
+    VALKEYMODULE_GET_API(ConfigGetNumeric);
+    VALKEYMODULE_GET_API(ConfigSet);
+    VALKEYMODULE_GET_API(ConfigSetBool);
+    VALKEYMODULE_GET_API(ConfigSetEnum);
+    VALKEYMODULE_GET_API(ConfigSetNumeric);
     VALKEYMODULE_GET_API(RdbStreamCreateFromFile);
     VALKEYMODULE_GET_API(RdbStreamFree);
     VALKEYMODULE_GET_API(RdbLoad);

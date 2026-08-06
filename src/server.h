@@ -3693,6 +3693,17 @@ void freeServerClientMemUsageBuckets(void);
 typedef struct ModuleConfig ModuleConfig;
 int performModuleConfigSetFromName(sds name, sds value, const char **err);
 int performModuleConfigSetDefaultFromName(sds name, const char **err);
+int getBoolConfigFromName(const char *name, int *value);
+int getConfigTypeFromName(const char *name, configType *res);
+int getStringConfigFromName(const char *name, sds *value);
+int getEnumConfigFromName(const char *name, sds *value);
+int getNumericConfigFromName(const char *name, long long *value);
+int setStringConfigFromName(client *c, const char *name, const char *value, const char **err);
+int setBoolConfigFromName(client *c, const char *name, int value, const char **err);
+int setEnumConfigFromName(client *c, const char *name, const char *value, const char **err);
+int setNumericConfigFromName(client *c, const char *name, long long value, const char **err);
+dictIterator *getConfigIterator(void);
+const char *configIteratorNext(dictIterator **iter, sds pattern, int is_glob, configType *typehint);
 void addModuleBoolConfig(const char *module_name, const char *name, int flags, void *privdata, int default_val);
 void addModuleStringConfig(const char *module_name, const char *name, int flags, void *privdata, sds default_val);
 void addModuleEnumConfig(const char *module_name,

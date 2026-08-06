@@ -694,6 +694,44 @@
 #define RedisModule_RegisterStringConfig ValkeyModule_RegisterStringConfig
 #define RedisModule_RegisterEnumConfig ValkeyModule_RegisterEnumConfig
 #define RedisModule_LoadConfigs ValkeyModule_LoadConfigs
+#define RedisModule_LoadDefaultConfigs ValkeyModule_LoadDefaultConfigs
+#define RedisModuleConfigType ValkeyModuleConfigType
+#define REDISMODULE_CONFIG_TYPE_BOOL VALKEYMODULE_CONFIG_TYPE_BOOL
+#define REDISMODULE_CONFIG_TYPE_NUMERIC VALKEYMODULE_CONFIG_TYPE_NUMERIC
+#define REDISMODULE_CONFIG_TYPE_STRING VALKEYMODULE_CONFIG_TYPE_STRING
+#define REDISMODULE_CONFIG_TYPE_ENUM VALKEYMODULE_CONFIG_TYPE_ENUM
+#define RedisModuleConfigIterator ValkeyModuleConfigIterator
+#define RedisModule_ConfigIteratorCreate ValkeyModule_ConfigIteratorCreate
+#define RedisModule_ConfigIteratorRelease ValkeyModule_ConfigIteratorRelease
+#define RedisModule_ConfigIteratorNext ValkeyModule_ConfigIteratorNext
+#define RedisModule_ConfigGetType ValkeyModule_ConfigGetType
+#define RedisModule_ConfigGet ValkeyModule_ConfigGet
+#define RedisModule_ConfigGetBool ValkeyModule_ConfigGetBool
+#define RedisModule_ConfigGetEnum ValkeyModule_ConfigGetEnum
+#define RedisModule_ConfigGetNumeric ValkeyModule_ConfigGetNumeric
+#define RedisModule_ConfigSet ValkeyModule_ConfigSet
+#define RedisModule_ConfigSetBool ValkeyModule_ConfigSetBool
+#define RedisModule_ConfigSetEnum ValkeyModule_ConfigSetEnum
+#define RedisModule_ConfigSetNumeric ValkeyModule_ConfigSetNumeric
+#define RedisModule_ClusterKeySlotC ValkeyModule_ClusterKeySlotC
+
+/* RedisModule_ACLCheckKeyPrefixPermissions can't be a plain alias: real Redis's
+ * signature is (user, RedisModuleString *prefix, int flags) (3 args), while
+ * Valkey's native ValkeyModule_ACLCheckKeyPrefixPermissions takes
+ * (user, const char *key, size_t len, unsigned int flags) (4 args, and the
+ * key is a raw pointer/len pair instead of a RedisModuleString). Adapt with a
+ * small inline shim instead. */
+static inline int RedisModule_ACLCheckKeyPrefixPermissions(ValkeyModuleUser *user,
+                                                             ValkeyModuleString *prefix,
+                                                             int flags) VALKEYMODULE_ATTR_UNUSED;
+static inline int RedisModule_ACLCheckKeyPrefixPermissions(ValkeyModuleUser *user,
+                                                             ValkeyModuleString *prefix,
+                                                             int flags) {
+    size_t len;
+    const char *key = ValkeyModule_StringPtrLen(prefix, &len);
+    return ValkeyModule_ACLCheckKeyPrefixPermissions(user, key, len, (unsigned int)flags);
+}
+
 #define RedisModule_RdbStreamCreateFromFile ValkeyModule_RdbStreamCreateFromFile
 #define RedisModule_RdbStreamFree ValkeyModule_RdbStreamFree
 #define RedisModule_RdbLoad ValkeyModule_RdbLoad

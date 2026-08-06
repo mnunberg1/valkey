@@ -764,6 +764,111 @@ int performModuleConfigSetDefaultFromName(sds name, const char **err) {
     return 0;
 }
 
+/* Find a bool config by name and return its current value. */
+int getBoolConfigFromName(const char *name, int *value) {
+    if (!name || !value) return 0;
+
+    sds config_name = sdsnew(name);
+    standardConfig *config = lookupConfig(config_name);
+    sdsfree(config_name);
+
+    if (!config || config->type != BOOL_CONFIG) return 0;
+
+    if (config->flags & MODULE_CONFIG) {
+        *value = getModuleBoolConfig(config->privdata);
+    } else {
+        *value = *(config->data.yesno.config);
+    }
+    return 1;
+}
+
+/* Find a config by name and return its type. */
+int getConfigTypeFromName(const char *name, configType *res) {
+    if (!name) return 0;
+
+    sds config_name = sdsnew(name);
+    standardConfig *config = lookupConfig(config_name);
+    sdsfree(config_name);
+
+    if (!config) return 0;
+    if (res) *res = config->type;
+    return 1;
+}
+
+/* Find a config by name and return its value serialized to an sds string,
+ * regardless of its underlying type. Caller owns the returned sds. */
+int getStringConfigFromName(const char *name, sds *value) {
+    if (!name) return 0;
+
+    sds config_name = sdsnew(name);
+    standardConfig *config = lookupConfig(config_name);
+    sdsfree(config_name);
+
+    if (!config) return 0;
+    if (value) *value = config->interface.get(config);
+    return 1;
+}
+
+/* Find an enum config by name and return its value serialized to an sds
+ * string (space-separated for multi-flag enums). Caller owns the returned sds. */
+int getEnumConfigFromName(const char *name, sds *value) {
+    if (!name) return 0;
+
+    sds config_name = sdsnew(name);
+    standardConfig *config = lookupConfig(config_name);
+    sdsfree(config_name);
+
+    if (!config || config->type != ENUM_CONFIG) return 0;
+    if (value) *value = config->interface.get(config);
+    return 1;
+}
+
+/* Return a fresh iterator over all registered configs (core and module).
+ * Used by the module Config Iterator API. Caller must eventually release it,
+ * either via dictReleaseIterator() directly or by exhausting/aborting it
+ * through configIteratorNext(). */
+dictIterator *getConfigIterator(void) {
+    return dictGetSafeIterator(configs);
+}
+
+/* Advance a config iterator obtained from getConfigIterator(), returning the
+ * next config name matching 'pattern' (glob pattern if 'is_glob', exact
+ * match otherwise), or NULL once exhausted (in which case '*iter' is
+ * released and cleared). Hidden configs are skipped during iteration, but
+ * can still be found via an exact-match pattern. If non-NULL, '*typehint' is
+ * set to the returned config's type. */
+const char *configIteratorNext(dictIterator **iter, sds pattern, int is_glob, configType *typehint) {
+    if (*iter == NULL) return NULL;
+
+    standardConfig *config = NULL;
+
+    /* Special case for non-glob patterns - we only need to check if the
+     * config exists and return it, saving iteration cycles. */
+    if (pattern && !is_glob) {
+        dictReleaseIterator(*iter);
+        *iter = NULL;
+
+        dictEntry *de = dictFind(configs, pattern);
+        if (!de) return NULL;
+        config = dictGetVal(de);
+        if (typehint) *typehint = config->type;
+        return config->name;
+    }
+
+    dictEntry *de = NULL;
+    while ((de = dictNext(*iter)) != NULL) {
+        config = dictGetVal(de);
+
+        /* Hidden configs require an exact match (handled above), not a pattern. */
+        if (config->flags & HIDDEN_CONFIG) continue;
+
+        if (!pattern || stringmatch(pattern, config->name, 1)) break;
+    }
+    if (!de) return NULL;
+    if (typehint) *typehint = config->type;
+    return config->name;
+}
+
 static void restoreBackupConfig(standardConfig **set_configs,
                                 sds *old_values,
                                 int count,
@@ -788,6 +893,103 @@ static void restoreBackupConfig(standardConfig **set_configs,
         if (!moduleConfigApplyConfig(module_configs, &errstr, NULL))
             serverLog(LL_WARNING, "Failed applying restored failed CONFIG SET command: %s", errstr);
     }
+}
+
+/*-----------------------------------------------------------------------------
+ * Single-config accessors for the module Config Get/Set API
+ *----------------------------------------------------------------------------*/
+
+/* Look up a config by name, verifying it's actually settable (exists, not
+ * immutable/protected, not denied while loading). Mirrors the per-config
+ * checks configSetCommand() performs before mutating each config. */
+static standardConfig *getMutableConfigFromName(client *c, const char *name, const char **err) {
+    sds config_name = sdsnew(name);
+    standardConfig *config = lookupConfig(config_name);
+    sdsfree(config_name);
+
+    if (!config) {
+        if (err) *err = "Config name not found";
+        return NULL;
+    }
+
+    if (config->flags & IMMUTABLE_CONFIG ||
+        (config->flags & PROTECTED_CONFIG && !allowProtectedAction(server.enable_protected_configs, c))) {
+        if (err) *err = (config->flags & IMMUTABLE_CONFIG) ? "Config is immutable" : "Config is protected";
+        return NULL;
+    }
+
+    if (server.loading && config->flags & DENY_LOADING_CONFIG) {
+        if (err) *err = "Config is not allowed during loading";
+        return NULL;
+    }
+
+    return config;
+}
+
+/* Run the apply step for a single just-set config (module-config apply
+ * callback, or the config's own interface.apply), restoring 'old_value' on
+ * failure. Mirrors the per-config apply logic in configSetCommand(), just
+ * for a single config instead of a batch. */
+static int applySingleConfigChange(standardConfig *config, sds old_value, const char **err) {
+    int res = 1;
+    if (config->flags & MODULE_CONFIG) {
+        list *module_configs_apply = listCreate();
+        addModuleConfigApply(module_configs_apply, config->privdata);
+        res = moduleConfigApplyConfig(module_configs_apply, err, NULL);
+        listRelease(module_configs_apply);
+    } else if (config->interface.apply) {
+        res = config->interface.apply(err);
+    }
+    if (!res) restoreBackupConfig(&config, &old_value, 1, NULL, NULL);
+    return res;
+}
+
+/* Set a config by name to a string value, regardless of its underlying type
+ * (multi-arg configs expect a single space-separated string, matching
+ * CONFIG SET's own convention). Returns 0 on failure (with *err set), 1 on
+ * success. */
+int setStringConfigFromName(client *c, const char *name, const char *value, const char **err) {
+    standardConfig *config = getMutableConfigFromName(c, name, err);
+    if (!config) return 0;
+
+    sds old_value = config->interface.get(config);
+    sds sds_value = sdsnew(value);
+    int res = performInterfaceSet(config, sds_value, err);
+    sdsfree(sds_value);
+
+    if (!res) {
+        restoreBackupConfig(&config, &old_value, 1, NULL, NULL);
+    } else {
+        res = applySingleConfigChange(config, old_value, err);
+    }
+    sdsfree(old_value);
+    return res;
+}
+
+/* Set a bool config by name. Returns 0 on failure (with *err set), 1 on success. */
+int setBoolConfigFromName(client *c, const char *name, int value, const char **err) {
+    standardConfig *config = getMutableConfigFromName(c, name, err);
+    if (!config) return 0;
+    if (config->type != BOOL_CONFIG) {
+        if (err) *err = "Config is not a bool config";
+        return 0;
+    }
+
+    return setStringConfigFromName(c, name, value ? "yes" : "no", err);
+}
+
+/* Set an enum config by name. 'value' is a single space-separated string for
+ * multi-flag enums, matching CONFIG SET's own convention. Returns 0 on
+ * failure (with *err set), 1 on success. */
+int setEnumConfigFromName(client *c, const char *name, const char *value, const char **err) {
+    standardConfig *config = getMutableConfigFromName(c, name, err);
+    if (!config) return 0;
+    if (config->type != ENUM_CONFIG) {
+        if (err) *err = "Config is not an enum config";
+        return 0;
+    }
+
+    return setStringConfigFromName(c, name, value, err);
 }
 
 /*-----------------------------------------------------------------------------
@@ -2291,6 +2493,62 @@ static void numericConfigRewrite(standardConfig *config, const char *name, struc
     } else {
         rewriteConfigNumericalOption(state, name, value, config->data.numeric.default_value);
     }
+}
+
+/* Find a numeric config by name and return its current value, reading the
+ * underlying typed storage directly (no string round-trip, so this is safe
+ * for PERCENT_CONFIG/OCTAL_CONFIG/etc. configs whose string encoding isn't
+ * a plain decimal number). */
+int getNumericConfigFromName(const char *name, long long *value) {
+    if (!name) return 0;
+
+    sds config_name = sdsnew(name);
+    standardConfig *config = lookupConfig(config_name);
+    sdsfree(config_name);
+
+    if (!config || config->type != NUMERIC_CONFIG) return 0;
+    if (value == NULL) return 1;
+
+    GET_NUMERIC_TYPE(*value)
+    return 1;
+}
+
+/* Set a numeric config by name to 'val', bypassing string parsing (so this
+ * is safe for PERCENT_CONFIG/OCTAL_CONFIG/etc. configs, unlike round-tripping
+ * through a decimal string via performInterfaceSet). Mirrors the body of
+ * numericConfigSet() minus the initial string-parsing step. */
+static int setNumericConfigInternal(standardConfig *config, long long val, const char **err) {
+    if (!numericBoundaryCheck(config, val, err)) return 0;
+    if (config->data.numeric.is_valid_fn && !config->data.numeric.is_valid_fn(val, err)) return 0;
+
+    long long prev = 0;
+    GET_NUMERIC_TYPE(prev)
+    if (prev != val) {
+        return setNumericType(config, val, err);
+    }
+    return (config->flags & VOLATILE_CONFIG) ? 1 : 2;
+}
+
+/* Set a numeric config by name to 'value'. Returns 0 on failure (with *err
+ * set), 1 on success. */
+int setNumericConfigFromName(client *c, const char *name, long long value, const char **err) {
+    standardConfig *config = getMutableConfigFromName(c, name, err);
+    if (!config) return 0;
+    if (config->type != NUMERIC_CONFIG) {
+        if (err) *err = "Config is not a numeric config";
+        return 0;
+    }
+
+    sds old_value = config->interface.get(config);
+    int res = setNumericConfigInternal(config, value, err);
+
+    if (!res) {
+        restoreBackupConfig(&config, &old_value, 1, NULL, NULL);
+    } else {
+        res = applySingleConfigChange(config, old_value, err);
+    }
+    sdsfree(old_value);
+    return res;
 }
 
 #define embedCommonNumericalConfig(name, alias, _flags, lower, upper, config_addr, default, num_conf_flags, is_valid, \
