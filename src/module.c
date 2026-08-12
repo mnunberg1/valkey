@@ -1278,6 +1278,17 @@ int64_t commandFlagsFromString(char *s) {
         else if (!strcasecmp(t,"no-mandatory-keys")) flags |= CMD_NO_MANDATORY_KEYS;
         else if (!strcasecmp(t,"allow-busy")) flags |= CMD_ALLOW_BUSY;
         else if (!strcasecmp(t,"all-dbs")) flags |= CMD_ALL_DBS;
+        /* Recognized-but-unimplemented flags, for Redis-module source compatibility.
+         * Accepted so registration doesn't fail outright for modules (e.g. RediSearch)
+         * that pass them, but neither carries any enforcement here yet, unlike real
+         * Redis: "internal" there also implies CMD_NOSCRIPT and hides/blocks the
+         * command from direct client execution (see Redis's commandFlagsFromString);
+         * "touches-arbitrary-keys" affects its key-spec/ACL key-permission checks.
+         * TODO: file a Valkey issue to give CMD_INTERNAL real semantics (hidden from
+         * COMMAND LIST/DOCS, not directly callable by regular clients, disallowed in
+         * scripts) instead of silently accepting-and-ignoring it. */
+        else if (!strcasecmp(t,"internal")) { /* Not yet enforced. See TODO above. */ }
+        else if (!strcasecmp(t,"touches-arbitrary-keys")) { /* Not yet enforced. See TODO above. */ }
         else break;
         /* clang-format on */
     }
