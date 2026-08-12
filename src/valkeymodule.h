@@ -149,6 +149,10 @@ typedef long long ustime_t;
 #define VALKEYMODULE_CONFIG_MEMORY (1ULL << 7)   /* Indicates if this value can be set as a memory value */
 #define VALKEYMODULE_CONFIG_BITFLAGS (1ULL << 8) /* Indicates if this value can be set as a multiple enum values */
 #define VALKEYMODULE_CONFIG_UNSIGNED (1ULL << 9)
+#define VALKEYMODULE_CONFIG_UNPREFIXED \
+    (1ULL << 10) /* Accepted for Redis-module source compatibility (REDISMODULE_CONFIG_UNPREFIXED). Not yet \
+                   * implemented: the config name is still prefixed with the module name like any other module \
+                   * config. Present so registration doesn't fail outright for modules that set this flag. */
 
 /* StreamID type. */
 typedef struct ValkeyModuleStreamID {
